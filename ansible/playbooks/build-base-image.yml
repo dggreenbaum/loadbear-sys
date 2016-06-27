@@ -1,0 +1,95 @@
+- hosts: localhost
+
+  tasks:
+
+    - name: Provision openstack VM
+      register: imageBuilderBase
+      os_server:
+        state: present
+        name: image-builder-base
+        image: 12f6a911-00a2-42eb-8712-d930da2da81f
+        key_name: personal
+        timeout: 200
+        flavor: gp1.supersonic
+        meta:
+          hostname: image-builder-base
+          group: uge_master
+
+    - add_host:
+        name: image-builder-base
+        groups: image-builder
+        ansible_host: "{{imageBuilderBase.server.public_v4}}"
+        ansible_user: dhc-user
+        ansible_become: true
+
+    - name: Wait for SSH
+      command: >
+        ssh -o BatchMode=yes -o StrictHostKeyChecking=no
+        dhc-user@{{imageBuilderBase.server.public_v4}} true
+      register: result
+      until: result|success
+      retries: 10
+      delay: 5
+
+    - name: Install python
+      command: >
+        ssh -o BatchMode=yes -o StrictHostKeyChecking=no
+        dhc-user@{{imageBuilderBase.server.public_v4}} "sudo apt-get install python -y"
+
+- hosts: image-builder-base
+
+  roles:
+    - { role: azavea.packer, packer_version: "0.10.1" }
+
+  tasks:
+
+    - name: Install packages
+      apt: name={{ item }}
+      with_items:
+        - git
+        - qemu
+        - qemu-kvm
+        - libvirt-bin
+        - python-glanceclient
+        - libguestfs-tools
+
+    - name: Checkout Packer loadbear-ubuntu-base project
+      git: repo=https://github.com/dggreenbaum/loadbear-ubuntu-base.git dest=/home/dhc-user/loadbear-ubuntu-base
+
+    - name: Checking for previously built image
+      stat: path=/home/dhc-user/loadbear-ubuntu-base/output-qemu/packer-qemu
+      register: rawimage
+
+    # - debug: var=rawimage
+
+    - name: Build image with packer - this takes a while
+      command: packer build ubuntu-16.04-qemu-raw.json
+      args:
+        chdir: /home/dhc-user/loadbear-ubuntu-base
+      when: rawimage.stat.exists == false
+      register: imageBuilt
+
+    - name: Sysprep the qemu image
+      command: virt-sysprep --format raw --operations user-account,defaults --remove-user-accounts install -a packer-qemu
+      args:
+        chdir: /home/dhc-user/loadbear-ubuntu-base/output-qemu
+      when: not imageBuilt|skipped
+
+    - name: Upload to glance
+      command: glance image-create --name "ubuntu-test" --disk-format raw --container-format bare --file packer-qemu
+      args:
+        chdir: /home/dhc-user/loadbear-ubuntu-base/output-qemu
+      environment:
+        OS_USERNAME:  "{{ lookup('env','OS_USERNAME') }}"
+        OS_PASSWORD:  "{{ lookup('env','OS_PASSWORD') }}"
+        OS_TENANT_ID: "{{ lookup('env','OS_TENANT_ID') }}"
+        OS_AUTH_URL:  "{{ lookup('env','OS_AUTH_URL') }}"
+
+- hosts: localhost
+
+  tasks:
+
+    - name: Destroy openstack VM
+      os_server:
+        state: absent
+        name: image-builder-base

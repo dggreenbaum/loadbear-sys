@@ -1,0 +1,1 @@
+ansible -u dhc-user -b -i openstack.py all -m ping

@@ -1,0 +1,5 @@
+- hosts: web
+  tasks:
+
+  - name: Test something
+    command: echo "FOO" > /home/dhc-user/foo.txt
